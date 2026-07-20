@@ -1,0 +1,792 @@
+From a8c2bb7a4d702549001f84a9eb12da833ce55094 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 20 Jul 2026 07:16:50 +0000
+Subject: [PATCH 1/2] =?UTF-8?q?feat:=20=E9=81=8E=E5=8E=BB=E8=A8=98?=
+ =?UTF-8?q?=E4=BA=8B91=E6=9C=AC=E3=81=AE=E3=83=89=E3=83=AA=E3=83=83?=
+ =?UTF-8?q?=E3=83=97=E9=85=8D=E4=BF=A1(backlog)=E3=82=92=E8=BF=BD=E5=8A=A0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- data/backlog_queue.json: 予約データ91件(2026/7/21-8/20, 毎日3回JST)
+- src/backlog.js: 既存 postToX/postToThreads を再利用したドリップ投稿
+- .github/workflows/backlog.yml: 1日3回のcron実行(新着通知とは独立)
+- POST_TO_X / POST_TO_THREADS でチャンネル切替可
+- npm run backlog / backlog:dry を追加
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ .github/workflows/backlog.yml |  50 ++++
+ README.md                     |  16 +-
+ data/backlog_queue.json       | 457 ++++++++++++++++++++++++++++++++++
+ package.json                  |   4 +-
+ src/backlog.js                |  88 +++++++
+ state/backlog_posted.json     |   1 +
+ 6 files changed, 614 insertions(+), 2 deletions(-)
+ create mode 100644 .github/workflows/backlog.yml
+ create mode 100644 data/backlog_queue.json
+ create mode 100644 src/backlog.js
+ create mode 100644 state/backlog_posted.json
+
+diff --git a/.github/workflows/backlog.yml b/.github/workflows/backlog.yml
+new file mode 100644
+index 0000000..a6565f8
+--- /dev/null
++++ b/.github/workflows/backlog.yml
+@@ -0,0 +1,50 @@
++name: note-backlog-drip
++# 過去記事(91本)を毎日3回、少しずつ X / Threads へ配信する。
++# 新着通知(notify.yml)とは独立。data/backlog_queue.json を消化しきったら自然停止。
++on:
++  schedule:
++    - cron: '30 22 * * *'   # 07:30 JST
++    - cron: '15 3 * * *'    # 12:15 JST
++    - cron: '0 12 * * *'    # 21:00 JST
++  workflow_dispatch:
++    inputs:
++      dry_run:
++        description: '投稿せず内容だけ確認 (DRY_RUN)'
++        type: boolean
++        default: false
++
++permissions:
++  contents: write
++concurrency:
++  group: note-backlog
++  cancel-in-progress: false
++jobs:
++  run:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-node@v4
++        with:
++          node-version: '20'
++          cache: 'npm'
++      - run: npm ci
++      - name: Run backlog drip
++        run: node src/backlog.js
++        env:
++          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
++          POST_TO_X: ${{ vars.POST_TO_X }}
++          POST_TO_THREADS: ${{ vars.POST_TO_THREADS }}
++          MAX_PER_RUN: '3'
++          X_API_KEY: ${{ secrets.X_API_KEY }}
++          X_API_SECRET: ${{ secrets.X_API_SECRET }}
++          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
++          X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
++          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
++          THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
++      - name: Commit state
++        run: |
++          git config user.name "github-actions[bot]"
++          git config user.email "github-actions[bot]@users.noreply.github.com"
++          git add state/backlog_posted.json
++          git commit -m "chore: update backlog state [skip ci]" || echo "no change"
++          git push
+diff --git a/README.md b/README.md
+index 55e1554..177058c 100644
+--- a/README.md
++++ b/README.md
+@@ -18,7 +18,21 @@ note の RSS を GitHub Actions（15分ごと）でポーリングし、
+           6.    （既存記事を処理済み化＝過去記事の一斉投稿を防止）
+           7.6. 以降は自動運用（cron）
+ 
+-            ## 注意
++## 過去記事のドリップ配信（backlog）
++新着通知とは別に、既存の91記事を毎日少しずつ X / Threads へ配信する仕組み。
++- 予約データ: `data/backlog_queue.json`（1本ずつ書き分けた告知文＋公開URL、予約日時つき）
++- 実行: `src/backlog.js` を `.github/workflows/backlog.yml` が1日3回（07:30 / 12:15 / 21:00 JST）実行
++- 処理済み管理: `state/backlog_posted.json`（新着通知の `posted.json` とは独立）
++- 消化しきると自動的に「No backlog items due」で止まる（初期化不要）
++
++手元での確認: `npm run backlog:dry`（投稿せず内容だけ表示）／ 本番手動: `npm run backlog`
++
++配信チャンネルの切替（GitHub の Settings → Secrets and variables → Actions → Variables）:
++- `POST_TO_X` = `false` で X をスキップ（Threadsのみ配信）
++- `POST_TO_THREADS` = `false` で Threads をスキップ
++- 未設定なら両方に配信。Secrets は新着通知と同じものを使い回す（追加不要）
++
++## 注意
+           - APIキー/トークンはコードに直書きせず必ず Secrets へ
+           - - 各 API の利用規約・自動投稿ポリシー・レート制限を遵守
+             - - Threads の長期トークンは有効期限があるため定期的な更新が必要
+diff --git a/data/backlog_queue.json b/data/backlog_queue.json
+new file mode 100644
+index 0000000..aca6bf1
+--- /dev/null
++++ b/data/backlog_queue.json
+@@ -0,0 +1,457 @@
++[
++  {
++    "id": "1",
++    "at": "2026-07-21T07:30:00+09:00",
++    "text": "ローカルAIアシスタント開発、続いてます。今回はエクスポート機能とファイル整理を実装。解析結果を「持ち出せる形」にするまでの試行錯誤を記録しました。【開発ログ#58】\nhttps://note.com/n/n003476f16aab"
++  },
++  {
++    "id": "2",
++    "at": "2026-07-21T12:15:00+09:00",
++    "text": "情報漏洩リスク、ゼロ。ローカルLLM×VS Code/Zedで「自立自走開発」を始めるための完全ロードマップをまとめました（有料note）。\nhttps://note.com/n/ne3486b353ad4"
++  },
++  {
++    "id": "3",
++    "at": "2026-07-21T21:00:00+09:00",
++    "text": "完全ローカル動作のAIアシスタントを作りました。Tauri+Rust+Qwenで、機密ファイルを外部に送らず安全に解析。構成と実装の話を全部書いています。\nhttps://note.com/n/ne4d58431b1c2"
++  },
++  {
++    "id": "4",
++    "at": "2026-07-22T07:30:00+09:00",
++    "text": "Claudeのセッション管理を横着したら、2時間作業が止まりました。同じ失敗をしないための、非エンジニア向けトークン節約術をまとめています。\nhttps://note.com/n/n5d7d9165f01a"
++  },
++  {
++    "id": "5",
++    "at": "2026-07-22T12:15:00+09:00",
++    "text": "13コミット、3,180行。でもこの日作ったのは機能じゃなく「線」でした。開発の優先順位の話。【開発ログ#57】\nhttps://note.com/n/na400ccdad3b3"
++  },
++  {
++    "id": "6",
++    "at": "2026-07-22T21:00:00+09:00",
++    "text": "数字は出す。でも判断はしない。会計AIを作りながら守り続けている「一線」について書きました。【開発ログ#56】\nhttps://note.com/n/na271944c95d5"
++  },
++  {
++    "id": "7",
++    "at": "2026-07-23T07:30:00+09:00",
++    "text": "「たぶん動く」と「動くのを見た」は違う。暫定で前に進むための考え方を記録しました。【開発ログ#55】\nhttps://note.com/n/n1633e4ac29b4"
++  },
++  {
++    "id": "8",
++    "at": "2026-07-23T12:15:00+09:00",
++    "text": "テスト328件、全部パス。なのに配布版は「0件」を返した——。開発版と配布版の落とし穴の話。【開発ログ#54】\nhttps://note.com/n/nae26a3af774a"
++  },
++  {
++    "id": "9",
++    "at": "2026-07-23T21:00:00+09:00",
++    "text": "AIの判定に「ハンコの流れ」と「指紋」を実装した日。会計AIの信頼性をどう担保するかの話。【開発ログ#53】\nhttps://note.com/n/n3c4bafe70d40"
++  },
++  {
++    "id": "10",
++    "at": "2026-07-24T07:30:00+09:00",
++    "text": "元教員のAIエンジニアが書いた「教員のためのClaude入門」。授業準備・校務での使いどころを必見／必読リストにまとめました（有料note）。\nhttps://note.com/n/n5e594bc382fe"
++  },
++  {
++    "id": "11",
++    "at": "2026-07-24T12:15:00+09:00",
++    "text": "文字化けするPDFをローカルAIに読ませるのに二日かかりました。何が起きて、どう突破したか。【開発ログ#52】\nhttps://note.com/n/n11eafa0e5f0b"
++  },
++  {
++    "id": "12",
++    "at": "2026-07-24T21:00:00+09:00",
++    "text": "完全オフラインのローカルRAGを組んだら、なぜか「中日ドラゴンズ」だけ検索から消えた話。原因と対策を書きました（有料note）。【開発ログ#51】\nhttps://note.com/n/ne871fbe4ab48"
++  },
++  {
++    "id": "13",
++    "at": "2026-07-25T07:30:00+09:00",
++    "text": "社内PCをそのままAIにする。追加コストほぼゼロ、データも外に出さない。異次元のコスパのローカルAI活用を紹介します。\nhttps://note.com/n/n396d8ca24fd9"
++  },
++  {
++    "id": "14",
++    "at": "2026-07-25T12:15:00+09:00",
++    "text": "ローカルAI開発の「Not-ToDo」。やらないと決めたことのリストが、実は一番の開発効率化でした。【開発ログ#50】\nhttps://note.com/n/n0a01471bdfb5"
++  },
++  {
++    "id": "15",
++    "at": "2026-07-25T21:00:00+09:00",
++    "text": "ローカルAIには会計の「事実」だけを任せる。判断を渡さない設計の話。【開発ログ#49】\nhttps://note.com/n/n3da80b96c10c"
++  },
++  {
++    "id": "16",
++    "at": "2026-07-26T07:30:00+09:00",
++    "text": "BIツール、結局どれが何なのか。非エンジニアでもわかるように整理しました。\nhttps://note.com/n/n491a55bf6bbc"
++  },
++  {
++    "id": "17",
++    "at": "2026-07-26T12:15:00+09:00",
++    "text": "自作のロジックに、自作の「誤りレポート」を判定させる。自己検証の仕組みづくりの話。【開発ログ#48】\nhttps://note.com/n/nab84f3d1ed84"
++  },
++  {
++    "id": "18",
++    "at": "2026-07-26T21:00:00+09:00",
++    "text": "「ぎゅられる」という超圧縮ワードと、アラフォーのAIエンジニアが「おじさん」と呼ばれて気づいたこと。\nhttps://note.com/n/n3a4035bbb8a9"
++  },
++  {
++    "id": "19",
++    "at": "2026-07-27T07:30:00+09:00",
++    "text": "実データを初めて流したら、AIの賢さなんて関係ないところで7回コケました。実務投入のリアル。【開発ログ#47】\nhttps://note.com/n/n370e72f2460b"
++  },
++  {
++    "id": "20",
++    "at": "2026-07-27T12:15:00+09:00",
++    "text": "AIに使われるか、AIを使うか、AIを作るか。AI活用の3段階、いまどこにいますか？\nhttps://note.com/n/n7994e8c57e27"
++  },
++  {
++    "id": "21",
++    "at": "2026-07-27T21:00:00+09:00",
++    "text": "「この子らを世の光に」──この言葉を、元教員として、いま改めて考えました。\nhttps://note.com/n/n7346fc49c330"
++  },
++  {
++    "id": "22",
++    "at": "2026-07-28T07:30:00+09:00",
++    "text": "優しいとは、人の憂いがわかること。暗闇を知るほど、光は眩しい。そんな話を書きました。\nhttps://note.com/n/n93e6d24840c8"
++  },
++  {
++    "id": "23",
++    "at": "2026-07-28T12:15:00+09:00",
++    "text": "元教諭のAIエンジニアがまとめた、学校の「AI実践ガイド」。現場で本当に使える形にしました（有料note）。\nhttps://note.com/n/nfce0c840b9df"
++  },
++  {
++    "id": "24",
++    "at": "2026-07-28T21:00:00+09:00",
++    "text": "「自分のPCで動くアプリ」を全員に配るには？配布の壁と突破口の話。【開発ログ#46】\nhttps://note.com/n/nb85067aa0236"
++  },
++  {
++    "id": "25",
++    "at": "2026-07-29T07:30:00+09:00",
++    "text": "業務の隠れた損失「手待ち（てまち）のムダ」。開発の視点から見直してみました。【開発ログ#45】\nhttps://note.com/n/n2d70fdf01aca"
++  },
++  {
++    "id": "26",
++    "at": "2026-07-29T12:15:00+09:00",
++    "text": "Claudeに何が起きてる？この2週間の「Fable・Mythos・政府指令」を整理しました。\nhttps://note.com/n/n506ad3736fa9"
++  },
++  {
++    "id": "27",
++    "at": "2026-07-29T21:00:00+09:00",
++    "text": "会計AIに「うちのやり方」を覚えさせた話。汎用AIを現場仕様にするプロセス。【開発ログ#44】\nhttps://note.com/n/nac83c5e5efa0"
++  },
++  {
++    "id": "28",
++    "at": "2026-07-30T07:30:00+09:00",
++    "text": "「AIで思考力低下」——話題の3研究、どこまで本当？「AIバカの壁」の本当と“盛り”を切り分けました。\nhttps://note.com/n/n26f547400e6f"
++  },
++  {
++    "id": "29",
++    "at": "2026-07-30T12:15:00+09:00",
++    "text": "「紙かデジタルか」の不毛な二項対立を、そろそろ終わらせませんか。\nhttps://note.com/n/nf2269f96aaf9"
++  },
++  {
++    "id": "30",
++    "at": "2026-07-30T21:00:00+09:00",
++    "text": "「外部に送っていません」を、貼り紙から実測に変えた日。ローカルAIの通信を実際に計測しました。【開発ログ#43】\nhttps://note.com/n/na9add823c3f5"
++  },
++  {
++    "id": "31",
++    "at": "2026-07-31T07:30:00+09:00",
++    "text": "失敗を緑で表示しない。UIの色ひとつに宿る設計思想の話。【開発ログ#42】\nhttps://note.com/n/ne8d1c4bfe190"
++  },
++  {
++    "id": "32",
++    "at": "2026-07-31T12:15:00+09:00",
++    "text": "AI駆動開発には罠がある。ハマった末にたどり着いた、AIを「最強の相棒」にするための3つの鉄則（有料note）。\nhttps://note.com/n/n0db527fa197e"
++  },
++  {
++    "id": "33",
++    "at": "2026-07-31T21:00:00+09:00",
++    "text": "参考書は、3日で閉じた。──だから「勝手に丸つけしてくれる」簿記練習帳を自作しました。\nhttps://note.com/n/n3929344e374d"
++  },
++  {
++    "id": "34",
++    "at": "2026-08-01T07:30:00+09:00",
++    "text": "一文書き足しただけでAIの回答が満点になった話。プロンプトの効き所。【開発ログ#41】\nhttps://note.com/n/n0aa7e7560ec9"
++  },
++  {
++    "id": "35",
++    "at": "2026-08-01T12:15:00+09:00",
++    "text": "「ローカルAIで会計実務はいける」を検証したら“半分ウソ”だった。どこまで行けて、どこからダメか。【開発ログ】\nhttps://note.com/n/n379d91aee13b"
++  },
++  {
++    "id": "36",
++    "at": "2026-08-01T21:00:00+09:00",
++    "text": "AIに「嘘をつかせない」と決めた。会計AIのハルシネーション対策、設計の話。【開発ログ#40】\nhttps://note.com/n/n3280ff10ee41"
++  },
++  {
++    "id": "37",
++    "at": "2026-08-02T07:30:00+09:00",
++    "text": "契約書を読む“会計AI”を、社内のPCだけで動かす。クラウドに出さない構成の話。【開発ログ#39】\nhttps://note.com/n/n5b7482c95e18"
++  },
++  {
++    "id": "38",
++    "at": "2026-08-02T12:15:00+09:00",
++    "text": "免許はあるのに、自信はなかった。──そんな私が会計に帰ってきた理由を書きました。\nhttps://note.com/n/n52985dc9e98d"
++  },
++  {
++    "id": "39",
++    "at": "2026-08-02T21:00:00+09:00",
++    "text": "賢いAIほど、ブレーキがいる。性能と安全設計の話。【開発ログ#38】\nhttps://note.com/n/n73ce2613fdab"
++  },
++  {
++    "id": "40",
++    "at": "2026-08-03T07:30:00+09:00",
++    "text": "AIの正答率「5/5」を疑え。少数サンプルの罠の話。【開発ログ#37】\nhttps://note.com/n/n32d7db8ea636"
++  },
++  {
++    "id": "41",
++    "at": "2026-08-03T12:15:00+09:00",
++    "text": "6.6GBの「自分のパソコンの中だけで動くAI」に契約書を読ませてみた結果。【開発ログ#36】\nhttps://note.com/n/nf5a921c34633"
++  },
++  {
++    "id": "42",
++    "at": "2026-08-03T21:00:00+09:00",
++    "text": "ネットも物理キーボードも無いPCで、最新のローカルAIを動かした日。【開発ログ#34】\nhttps://note.com/n/nb5af7a82101f"
++  },
++  {
++    "id": "43",
++    "at": "2026-08-04T07:30:00+09:00",
++    "text": "Tailscale導入、「何もわからない」から始まった絶望と、そこから学んだこと。\nhttps://note.com/n/n7ee7a884e23b"
++  },
++  {
++    "id": "44",
++    "at": "2026-08-04T12:15:00+09:00",
++    "text": "AIは賢い。一日溶かしたのは、ぜんぶ“AIの外側”だった。環境構築のリアル。【開発ログ#35】\nhttps://note.com/n/ne8054e840b7a"
++  },
++  {
++    "id": "45",
++    "at": "2026-08-04T21:00:00+09:00",
++    "text": "AIに指揮するって、たぶんこういうことだ。人間側の役割の話。【開発ログ#33】\nhttps://note.com/n/n3e276d8cfbd4"
++  },
++  {
++    "id": "46",
++    "at": "2026-08-05T07:30:00+09:00",
++    "text": "「OllamaとLlamaって同じ？」——初学者が混乱する9つの紛らわしいペアを整理しました。【開発ログ#32】\nhttps://note.com/n/nddff56e7238c"
++  },
++  {
++    "id": "47",
++    "at": "2026-08-05T12:15:00+09:00",
++    "text": "ChatGPTを導入できない場所で、僕らはどうやってAIと働くか。制約の中のAI活用。【開発ログ#31】\nhttps://note.com/n/nade49ad99f1a"
++  },
++  {
++    "id": "48",
++    "at": "2026-08-05T21:00:00+09:00",
++    "text": "「……はどうですか？」でフリーズする私。ASDなAIエンジニアが救われる「3つの話し方」の話。\nhttps://note.com/n/n0df538831a86"
++  },
++  {
++    "id": "49",
++    "at": "2026-08-06T07:30:00+09:00",
++    "text": "「分析と実装に境界はない」。開発の進め方を変えた気づきの記録。【開発ログ#29】\nhttps://note.com/n/n78389bd612f4"
++  },
++  {
++    "id": "50",
++    "at": "2026-08-06T12:15:00+09:00",
++    "text": "新戦略「マルチ画像参照方式」を試した記録。【開発ログ#28】\nhttps://note.com/n/n3c463f9be1f3"
++  },
++  {
++    "id": "51",
++    "at": "2026-08-06T21:00:00+09:00",
++    "text": "開発ログ#27（5/11）。この日の実装とつまずきを、そのまま記録しています。非エンジニアからのAI開発の跡。\nhttps://note.com/n/n12b49bb29b5a"
++  },
++  {
++    "id": "52",
++    "at": "2026-08-07T07:30:00+09:00",
++    "text": "開発ログ#26（5/8）。うまくいったことより、コケたことを多めに書いています。日々の開発記録です。\nhttps://note.com/n/n26175a4a6876"
++  },
++  {
++    "id": "53",
++    "at": "2026-08-07T12:15:00+09:00",
++    "text": "開発ログ#25（5/7）。小さな前進の記録。積み重ねの先に今があります。\nhttps://note.com/n/nc8bea195c463"
++  },
++  {
++    "id": "54",
++    "at": "2026-08-07T21:00:00+09:00",
++    "text": "撮影しないYouTuber #2。顔出しも撮影もしない動画づくりの実験、続きです。\nhttps://note.com/n/nc76b0b0fc902"
++  },
++  {
++    "id": "55",
++    "at": "2026-08-08T07:30:00+09:00",
++    "text": "撮影しないYouTuber #1。撮影ゼロで動画コンテンツを作る実験を始めました。\nhttps://note.com/n/ne0b0c22dc626"
++  },
++  {
++    "id": "56",
++    "at": "2026-08-08T12:15:00+09:00",
++    "text": "開発ログ#24（5/1）。この日やったこと・学んだことのメモ。開発の裏側です。\nhttps://note.com/n/nf5339cf4fedd"
++  },
++  {
++    "id": "57",
++    "at": "2026-08-08T21:00:00+09:00",
++    "text": "開発ログ#23（4/29）。試行錯誤の生ログ。同じ道を歩く人のヒントになれば。\nhttps://note.com/n/n18c7c6fd279b"
++  },
++  {
++    "id": "58",
++    "at": "2026-08-09T07:30:00+09:00",
++    "text": "値は張るけど、デュアルディスプレイの壁を一発で超えられる一台。開発環境への投資の話。\nhttps://note.com/n/na272ca67380c"
++  },
++  {
++    "id": "59",
++    "at": "2026-08-09T12:15:00+09:00",
++    "text": "開発ログ#22（4/28）。この日の実装とつまずきを、そのまま記録しています。非エンジニアからのAI開発の跡。\nhttps://note.com/n/nb1a6f5cd73e6"
++  },
++  {
++    "id": "60",
++    "at": "2026-08-09T21:00:00+09:00",
++    "text": "開発ログ#21（4/27）。うまくいったことより、コケたことを多めに書いています。日々の開発記録です。\nhttps://note.com/n/n098becfcc04b"
++  },
++  {
++    "id": "61",
++    "at": "2026-08-10T07:30:00+09:00",
++    "text": "開発ログ#20（4/24）。小さな前進の記録。積み重ねの先に今があります。\nhttps://note.com/n/n13ea0303f715"
++  },
++  {
++    "id": "62",
++    "at": "2026-08-10T12:15:00+09:00",
++    "text": "開発ログ#19（4/23）。この日やったこと・学んだことのメモ。開発の裏側です。\nhttps://note.com/n/n4c214ef8e83c"
++  },
++  {
++    "id": "63",
++    "at": "2026-08-10T21:00:00+09:00",
++    "text": "開発ログ#18（4/22）。試行錯誤の生ログ。同じ道を歩く人のヒントになれば。\nhttps://note.com/n/n202903b92507"
++  },
++  {
++    "id": "64",
++    "at": "2026-08-11T07:30:00+09:00",
++    "text": "「自律」をインストールする。教育フィンテックが目指す、自立の再定義について。\nhttps://note.com/n/n4e2d73ed6d57"
++  },
++  {
++    "id": "65",
++    "at": "2026-08-11T12:15:00+09:00",
++    "text": "アプリを「Job Saga」にリブランドしました。午後の実装ダイジェスト。\nhttps://note.com/n/nfd3aaeba75d2"
++  },
++  {
++    "id": "66",
++    "at": "2026-08-11T21:00:00+09:00",
++    "text": "メール不要・子供主導で始める、ファミリーアプリ設計の実装Tipsをまとめました。\nhttps://note.com/n/nf2f554361c57"
++  },
++  {
++    "id": "67",
++    "at": "2026-08-12T07:30:00+09:00",
++    "text": "開発ログ#17（4/21）。この日の実装とつまずきを、そのまま記録しています。非エンジニアからのAI開発の跡。\nhttps://note.com/n/n4cded2a22930"
++  },
++  {
++    "id": "68",
++    "at": "2026-08-12T12:15:00+09:00",
++    "text": "開発ログ#16（4/20）。うまくいったことより、コケたことを多めに書いています。日々の開発記録です。\nhttps://note.com/n/n5c0b0fce7130"
++  },
++  {
++    "id": "69",
++    "at": "2026-08-12T21:00:00+09:00",
++    "text": "開発ログ#15（4/19）。小さな前進の記録。積み重ねの先に今があります。\nhttps://note.com/n/nfc6cd5566c1d"
++  },
++  {
++    "id": "70",
++    "at": "2026-08-13T07:30:00+09:00",
++    "text": "開発ログ#13（4/17）。この日やったこと・学んだことのメモ。開発の裏側です。\nhttps://note.com/n/naae30f02948a"
++  },
++  {
++    "id": "71",
++    "at": "2026-08-13T12:15:00+09:00",
++    "text": "開発ログ#12（4/16）。試行錯誤の生ログ。同じ道を歩く人のヒントになれば。\nhttps://note.com/n/n55536d084a2b"
++  },
++  {
++    "id": "72",
++    "at": "2026-08-13T21:00:00+09:00",
++    "text": "開発ログ#11（4/15）。この日の実装とつまずきを、そのまま記録しています。非エンジニアからのAI開発の跡。\nhttps://note.com/n/nacd1869330f8"
++  },
++  {
++    "id": "73",
++    "at": "2026-08-14T07:30:00+09:00",
++    "text": "開発ログ#10（4/14）。うまくいったことより、コケたことを多めに書いています。日々の開発記録です。\nhttps://note.com/n/n61be5f49a750"
++  },
++  {
++    "id": "74",
++    "at": "2026-08-14T12:15:00+09:00",
++    "text": "おこづかいクエスト、1日でここまで実装した話。スピード開発の記録。【開発ログ#014】\nhttps://note.com/n/nf747efdd4ef4"
++  },
++  {
++    "id": "75",
++    "at": "2026-08-14T21:00:00+09:00",
++    "text": "開発ログ#9（4/13）。小さな前進の記録。積み重ねの先に今があります。\nhttps://note.com/n/n770921c03dd2"
++  },
++  {
++    "id": "76",
++    "at": "2026-08-15T07:30:00+09:00",
++    "text": "【React Native/Expo】TestFlightでiOSアプリを配布する手順を、つまずき所込みでまとめました（有料note）。\nhttps://note.com/n/n37f42ccf927b"
++  },
++  {
++    "id": "77",
++    "at": "2026-08-15T12:15:00+09:00",
++    "text": "MVP、リリースしました。元教員のアプリ開発チャレンジ、ひとつの節目のご報告です。\nhttps://note.com/n/n93aefb148152"
++  },
++  {
++    "id": "78",
++    "at": "2026-08-15T21:00:00+09:00",
++    "text": "誰のためのアプリか。ペルソナに込めた「16年の現場」と「私の原体験」の話。\nhttps://note.com/n/n7e0a2399cb2b"
++  },
++  {
++    "id": "79",
++    "at": "2026-08-16T07:30:00+09:00",
++    "text": "ゲーミフィケーションはどう収益化する？Habiticaモデルを分析しました（有料note）。\nhttps://note.com/n/n7289f5718506"
++  },
++  {
++    "id": "80",
++    "at": "2026-08-16T12:15:00+09:00",
++    "text": "元教員 #アプリリリースチャレンジ 。Claude×教育アプリ開発の記録、ここから始まりました。\nhttps://note.com/n/nc263e829c984"
++  },
++  {
++    "id": "81",
++    "at": "2026-08-16T21:00:00+09:00",
++    "text": "開発ログ#8（4/10）。この日やったこと・学んだことのメモ。開発の裏側です。\nhttps://note.com/n/nb0e8b04238f3"
++  },
++  {
++    "id": "82",
++    "at": "2026-08-17T07:30:00+09:00",
++    "text": "開発ログ#7（4/9）。試行錯誤の生ログ。同じ道を歩く人のヒントになれば。\nhttps://note.com/n/n18c5c6b39542"
++  },
++  {
++    "id": "83",
++    "at": "2026-08-17T12:15:00+09:00",
++    "text": "開発ログ#6（4/8）。この日の実装とつまずきを、そのまま記録しています。非エンジニアからのAI開発の跡。\nhttps://note.com/n/nd81a2c1bcd22"
++  },
++  {
++    "id": "84",
++    "at": "2026-08-17T21:00:00+09:00",
++    "text": "開発ログ#5（4/7）。うまくいったことより、コケたことを多めに書いています。日々の開発記録です。\nhttps://note.com/n/n6cbad0faabf1"
++  },
++  {
++    "id": "85",
++    "at": "2026-08-18T07:30:00+09:00",
++    "text": "教育現場の課題を、元教員がアプリで解決する。その過程をぜんぶ公開しています。\nhttps://note.com/n/nf1f9ff03c9c9"
++  },
++  {
++    "id": "86",
++    "at": "2026-08-18T12:15:00+09:00",
++    "text": "AIと駆ける、バイブコーディング。ノンエンジニアが数時間で「つくる側」に突き抜けるプロセス。\nhttps://note.com/n/n298268046133"
++  },
++  {
++    "id": "87",
++    "at": "2026-08-18T21:00:00+09:00",
++    "text": "開発ログ#4（4/6）。小さな前進の記録。積み重ねの先に今があります。\nhttps://note.com/n/n091131e089b1"
++  },
++  {
++    "id": "88",
++    "at": "2026-08-19T07:30:00+09:00",
++    "text": "お手伝いが「金融教育」に変わる。海外アプリ「BusyKid」が画期的すぎたので紹介します。\nhttps://note.com/n/nd6eb2d4e5396"
++  },
++  {
++    "id": "89",
++    "at": "2026-08-19T12:15:00+09:00",
++    "text": "開発ログ#3（4/3）。この日やったこと・学んだことのメモ。開発の裏側です。\nhttps://note.com/n/n19ae9af405f7"
++  },
++  {
++    "id": "90",
++    "at": "2026-08-19T21:00:00+09:00",
++    "text": "開発ログ#2（4/2）。試行錯誤の生ログ。同じ道を歩く人のヒントになれば。\nhttps://note.com/n/n4aacebe5a35f"
++  },
++  {
++    "id": "91",
++    "at": "2026-08-20T07:30:00+09:00",
++    "text": "すべてはここから始まりました。開発ログ#001（4/1）。非エンジニアのAI開発、最初の一歩の記録です。\nhttps://note.com/n/n9ee98f7fe6ea"
++  }
++]
+diff --git a/package.json b/package.json
+index 54ce81e..06d2359 100644
+--- a/package.json
++++ b/package.json
+@@ -5,7 +5,9 @@
+     "private": true,
+     "scripts": {
+           "start": "node src/index.js",
+-          "init": "INIT=1 node src/index.js"
++          "init": "INIT=1 node src/index.js",
++          "backlog": "node src/backlog.js",
++          "backlog:dry": "DRY_RUN=1 node src/backlog.js"
+     },
+     "dependencies": {
+           "rss-parser": "^3.13.0",
+diff --git a/src/backlog.js b/src/backlog.js
+new file mode 100644
+index 0000000..e94d8d0
+--- /dev/null
++++ b/src/backlog.js
+@@ -0,0 +1,88 @@
++// 過去記事ドリップ配信ボット
++// data/backlog_queue.json の予約分（at <= 現在時刻）を X / Threads へ投稿。
++// 既存の新着通知(index.js)とは独立し、state/backlog_posted.json で処理済みを管理する。
++//
++// 環境変数:
++//   POST_TO_X       'false' で X をスキップ（既定: 投稿する）
++//   POST_TO_THREADS 'false' で Threads をスキップ（既定: 投稿する）
++//   MAX_PER_RUN     1回の実行で投稿する最大件数（既定: 3 = 取りこぼし追い付き用）
++//   DRY_RUN         '1' で実際には投稿せず内容だけ表示
++import fs from 'fs/promises';
++import path from 'path';
++import { postToX } from './x.js';
++import { postToThreads } from './threads.js';
++
++const QUEUE_PATH = path.resolve('data/backlog_queue.json');
++const STATE_PATH = path.resolve('state/backlog_posted.json');
++
++const POST_X = process.env.POST_TO_X !== 'false';
++const POST_THREADS = process.env.POST_TO_THREADS !== 'false';
++const MAX_PER_RUN = parseInt(process.env.MAX_PER_RUN || '3', 10);
++const DRY_RUN = process.env.DRY_RUN === '1';
++
++async function loadJson(p, fallback) {
++    try { return JSON.parse(await fs.readFile(p, 'utf8')); }
++    catch { return fallback; }
++}
++
++async function saveState(set) {
++    await fs.mkdir(path.dirname(STATE_PATH), { recursive: true });
++    await fs.writeFile(STATE_PATH, JSON.stringify([...set], null, 2) + '\n');
++}
++
++async function main() {
++    const queue = await loadJson(QUEUE_PATH, []);
++    const posted = new Set(await loadJson(STATE_PATH, []));
++    const now = Date.now();
++
++  const due = queue
++        .filter(function (q) { return !posted.has(q.id); })
++        .filter(function (q) { return new Date(q.at).getTime() <= now; })
++        .sort(function (a, b) { return new Date(a.at) - new Date(b.at); })
++        .slice(0, MAX_PER_RUN);
++
++  if (due.length === 0) { console.log('No backlog items due'); return; }
++
++  for (const item of due) {
++        if (DRY_RUN) {
++                console.log('[DRY] id=' + item.id + '\n' + item.text + '\n');
++                posted.add(item.id);
++                continue;
++        }
++
++    let anyOk = false;
++        if (POST_X) {
++                try {
++                        const xId = await postToX(item.text);
++                        console.log('X posted OK: id=' + item.id + ' (' + xId + ')');
++                        anyOk = true;
++                } catch (e) {
++                        console.error('X post failed: id=' + item.id + ' - ' + e.message);
++                }
++        }
++        if (POST_THREADS) {
++                try {
++                        const thId = await postToThreads(item.text);
++                        console.log('Threads posted OK: id=' + item.id + ' (' + thId + ')');
++                        anyOk = true;
++                } catch (e) {
++                        console.error('Threads post failed: id=' + item.id + ' - ' + e.message);
++                }
++        }
++
++    // どちらかに投稿できたら処理済みにする（両方失敗した場合のみ次回リトライ）
++        if (anyOk) {
++                posted.add(item.id);
++                await saveState(posted);
++        } else {
++                console.error('Both channels failed for id=' + item.id + ', will retry next run');
++                break;
++        }
++  }
++
++  if (DRY_RUN) { console.log('(dry-run: state not saved)'); return; }
++    await saveState(posted);
++    console.log('Backlog progress: ' + posted.size + '/' + queue.length + ' posted');
++}
++
++main().catch(function (e) { console.error(e); process.exit(1); });
+diff --git a/state/backlog_posted.json b/state/backlog_posted.json
+new file mode 100644
+index 0000000..fe51488
+--- /dev/null
++++ b/state/backlog_posted.json
+@@ -0,0 +1 @@
++[]
+-- 
+2.43.0
+
+
+From 052cb07c934103fce8fb20006bd46e287be431c6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 20 Jul 2026 07:17:48 +0000
+Subject: [PATCH 2/2] =?UTF-8?q?chore:=20add=20package-lock.json=20(npm=20c?=
+ =?UTF-8?q?i=20=E7=94=A8)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ package-lock.json | 72 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 72 insertions(+)
+ create mode 100644 package-lock.json
+
+diff --git a/package-lock.json b/package-lock.json
+new file mode 100644
+index 0000000..8597440
+--- /dev/null
++++ b/package-lock.json
+@@ -0,0 +1,72 @@
++{
++    "name": "note-autopost",
++    "version": "1.0.0",
++    "lockfileVersion": 3,
++    "requires": true,
++    "packages": {
++        "": {
++            "name": "note-autopost",
++            "version": "1.0.0",
++            "dependencies": {
++                "rss-parser": "^3.13.0",
++                "twitter-api-v2": "^1.18.2"
++            }
++        },
++        "node_modules/entities": {
++            "version": "2.2.0",
++            "resolved": "https://registry.npmjs.org/entities/-/entities-2.2.0.tgz",
++            "integrity": "sha512-p92if5Nz619I0w+akJrLZH0MX0Pb5DX39XOwQTtXSdQQOaYH03S1uIQp4mhOZtAXrxq4ViO67YTiLBo2638o9A==",
++            "license": "BSD-2-Clause",
++            "funding": {
++                "url": "https://github.com/fb55/entities?sponsor=1"
++            }
++        },
++        "node_modules/rss-parser": {
++            "version": "3.13.0",
++            "resolved": "https://registry.npmjs.org/rss-parser/-/rss-parser-3.13.0.tgz",
++            "integrity": "sha512-7jWUBV5yGN3rqMMj7CZufl/291QAhvrrGpDNE4k/02ZchL0npisiYYqULF71jCEKoIiHvK/Q2e6IkDwPziT7+w==",
++            "license": "MIT",
++            "dependencies": {
++                "entities": "^2.0.3",
++                "xml2js": "^0.5.0"
++            }
++        },
++        "node_modules/sax": {
++            "version": "1.6.0",
++            "resolved": "https://registry.npmjs.org/sax/-/sax-1.6.0.tgz",
++            "integrity": "sha512-6R3J5M4AcbtLUdZmRv2SygeVaM7IhrLXu9BmnOGmmACak8fiUtOsYNWUS4uK7upbmHIBbLBeFeI//477BKLBzA==",
++            "license": "BlueOak-1.0.0",
++            "engines": {
++                "node": ">=11.0.0"
++            }
++        },
++        "node_modules/twitter-api-v2": {
++            "version": "1.29.0",
++            "resolved": "https://registry.npmjs.org/twitter-api-v2/-/twitter-api-v2-1.29.0.tgz",
++            "integrity": "sha512-v473q5bwme4N+DWSg6qY+JCvfg1nSJRWwui3HUALafxfqCvVkKiYmS/5x/pVeJwTmyeBxexMbzHwnzrH4h6oYQ==",
++            "license": "Apache-2.0"
++        },
++        "node_modules/xml2js": {
++            "version": "0.5.0",
++            "resolved": "https://registry.npmjs.org/xml2js/-/xml2js-0.5.0.tgz",
++            "integrity": "sha512-drPFnkQJik/O+uPKpqSgr22mpuFHqKdbS835iAQrUC73L2F5WkboIRd63ai/2Yg6I1jzifPFKH2NTK+cfglkIA==",
++            "license": "MIT",
++            "dependencies": {
++                "sax": ">=0.6.0",
++                "xmlbuilder": "~11.0.0"
++            },
++            "engines": {
++                "node": ">=4.0.0"
++            }
++        },
++        "node_modules/xmlbuilder": {
++            "version": "11.0.1",
++            "resolved": "https://registry.npmjs.org/xmlbuilder/-/xmlbuilder-11.0.1.tgz",
++            "integrity": "sha512-fDlsI/kFEx7gLvbecc0/ohLG50fugQp8ryHzMTuW9vSa1GJ0XYWKnhsUx7oie3G98+r56aTQIUB4kht42R3JvA==",
++            "license": "MIT",
++            "engines": {
++                "node": ">=4.0"
++            }
++        }
++    }
++}
+-- 
+2.43.0
+

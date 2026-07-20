@@ -1,0 +1,50 @@
+name: note-backlog-drip
+# 過去記事(91本)を毎日3回、少しずつ X / Threads へ配信する。
+# 新着通知(notify.yml)とは独立。data/backlog_queue.json を消化しきったら自然停止。
+on:
+  schedule:
+    - cron: '30 22 * * *'   # 07:30 JST
+    - cron: '15 3 * * *'    # 12:15 JST
+    - cron: '0 12 * * *'    # 21:00 JST
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '投稿せず内容だけ確認 (DRY_RUN)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+concurrency:
+  group: note-backlog
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Run backlog drip
+        run: node src/backlog.js
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
+          POST_TO_X: ${{ vars.POST_TO_X }}
+          POST_TO_THREADS: ${{ vars.POST_TO_THREADS }}
+          MAX_PER_RUN: '3'
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+          THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
+      - name: Commit state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/backlog_posted.json
+          git commit -m "chore: update backlog state [skip ci]" || echo "no change"
+          git push
